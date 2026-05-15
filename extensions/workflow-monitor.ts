@@ -1,7 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { createWorkflowHandler, type WorkflowMonitorState } from "./workflow-monitor/workflow-handler.ts";
-import { getCurrentGitRef } from "./workflow-monitor/git.ts";
-import { warningForViolation } from "./workflow-monitor/warnings.ts";
 import { WORKFLOW_PHASES, type WorkflowPhase } from "./workflow-monitor/workflow-tracker.ts";
 import { buildWorkflowNextPrefill } from "./workflow-monitor/workflow-transitions.ts";
 
@@ -60,9 +58,6 @@ function hasTddActivity(state: WorkflowMonitorState): boolean {
   return state.tdd.hasTestChange || state.tdd.lastTestExitCode !== null;
 }
 
-// Keep this phase strip visually identical to pi-superpowers-plus:
-// current: accent [phase], complete: success ✓phase, skipped/pending: dim,
-// separator: dim " → ". Do not simplify to plain string-array widgets.
 function formatPhaseStrip(state: WorkflowMonitorState, theme: any): string {
   if (!state.workflow.currentPhase) return "";
   const arrow = theme.fg("dim", " → ");
@@ -128,17 +123,8 @@ function parseWorkflowNextArgs(args: string): { phase: WorkflowPhase; artifact?:
 
 export default function (pi: ExtensionAPI) {
   const handler = createWorkflowHandler();
-  let branchReminderSent = false;
-
-  function notifyBranchSafety(ctx: ExtensionContext): void {
-    if (branchReminderSent) return;
-    branchReminderSent = true;
-    const ref = getCurrentGitRef() ?? "git ref unavailable";
-    ctx.ui.notify(`Superpowers branch safety: first write in this session on ${ref}. Confirm this is the intended branch/worktree.`, "warning");
-  }
 
   function reconstruct(ctx: ExtensionContext): void {
-    branchReminderSent = false;
     const state = latestState(ctx);
     if (state) handler.setFullState(state);
     else handler.resetState();
@@ -156,14 +142,9 @@ export default function (pi: ExtensionAPI) {
     if (result.changed) persist(pi, ctx, handler);
   });
 
-  pi.on("tool_call", async (event: any, ctx) => {
-    const result = handler.handleToolCall(event.toolName, event.input);
-    if (result.violation) {
-      const reason = warningForViolation(result.violation);
-      ctx.ui.notify(reason, "warning");
-      return { block: true, reason };
-    }
-    if (result.changed) persist(pi, ctx, handler);
+  pi.on("tool_call", async (event: any, _ctx) => {
+    // Track state but never block or warn
+    handler.handleToolCall(event.toolName, event.input);
   });
 
   pi.on("tool_result", async (event: any, ctx) => {
@@ -172,10 +153,8 @@ export default function (pi: ExtensionAPI) {
     if ((event.toolName === "write" || event.toolName === "edit") && !event.isError) {
       const path = pathFromInput(event.input);
       if (path) {
-        notifyBranchSafety(ctx);
         const result = handler.handleFileWritten(path);
         changed = result.changed || changed;
-        if (result.violation) ctx.ui.notify(warningForViolation(result.violation), "warning");
       }
     }
 
@@ -191,7 +170,6 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("workflow-reset", {
     description: "Reset pi-superpowers workflow monitor state",
     handler: async (_args, ctx) => {
-      branchReminderSent = false;
       handler.resetState();
       persist(pi, ctx, handler);
       ctx.ui.notify("Superpowers workflow state reset", "info");
